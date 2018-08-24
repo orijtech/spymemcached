@@ -53,6 +53,10 @@ import net.spy.memcached.transcoders.TranscodeService;
 import net.spy.memcached.transcoders.Transcoder;
 import net.spy.memcached.util.StringUtils;
 
+// Observability
+import net.spy.memcached.Observability;
+import net.spy.memcached.Observability.RoundtripTrackingSpan;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -229,13 +233,19 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public Collection<SocketAddress> getAvailableServers() {
-    ArrayList<SocketAddress> rv = new ArrayList<SocketAddress>();
-    for (MemcachedNode node : mconn.getLocator().getAll()) {
-      if (node.isActive()) {
-        rv.add(node.getSocketAddress());
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.getAvailableServers", "getAvailableServers");
+
+    try {
+      ArrayList<SocketAddress> rv = new ArrayList<SocketAddress>();
+      for (MemcachedNode node : mconn.getLocator().getAll()) {
+        if (node.isActive()) {
+          rv.add(node.getSocketAddress());
+        }
       }
+      return rv;
+    } finally {
+      span.end();
     }
-    return rv;
   }
 
   /**
@@ -251,13 +261,19 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public Collection<SocketAddress> getUnavailableServers() {
-    ArrayList<SocketAddress> rv = new ArrayList<SocketAddress>();
-    for (MemcachedNode node : mconn.getLocator().getAll()) {
-      if (!node.isActive()) {
-        rv.add(node.getSocketAddress());
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.geUnavailableServers", "getUnavailableServers");
+
+    try {
+      ArrayList<SocketAddress> rv = new ArrayList<SocketAddress>();
+      for (MemcachedNode node : mconn.getLocator().getAll()) {
+        if (!node.isActive()) {
+          rv.add(node.getSocketAddress());
+        }
       }
+      return rv;
+    } finally {
+      span.end();
     }
-    return rv;
   }
 
   /**
@@ -724,6 +740,8 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
   @Override
   public <T> CASResponse cas(String key, long casId, int exp, T value,
       Transcoder<T> tc) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.cas", "cas");
+    
     CASResponse casr;
     try {
       OperationFuture<CASResponse> casOp = asyncCAS(key,
@@ -732,16 +750,37 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
           TimeUnit.MILLISECONDS);
       return casr;
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new RuntimeException("Interrupted waiting for value", e);
     } catch (ExecutionException e) {
       if(e.getCause() instanceof CancellationException) {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw (CancellationException) e.getCause();
       } else {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw new RuntimeException("Exception waiting for value", e);
       }
     } catch (TimeoutException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "cas"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForValue"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new OperationTimeoutException("Timeout waiting for value: "
         + buildTimeoutMessage(operationTimeout, TimeUnit.MILLISECONDS), e);
+    } finally {
+      Observability.recordStatWithTags(Observability.mKeyLength, key.length(),
+                        Observability.tagKeyPair(Observability.keyMethod, "cas"));
+      span.end();
     }
   }
 
@@ -1132,18 +1171,44 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public <T> CASValue<T> gets(String key, Transcoder<T> tc) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.gets", "gets");
+    
     try {
       return asyncGets(key, tc).get(operationTimeout, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForValue"),
+              Observability.tagKeyPair(Observability.keyType, "interrupted"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new RuntimeException("Interrupted waiting for value", e);
     } catch (ExecutionException e) {
       if(e.getCause() instanceof CancellationException) {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyType, "execution"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw (CancellationException) e.getCause();
       } else {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyType, "execution"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw new RuntimeException("Exception waiting for value", e);
       }
     } catch (TimeoutException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "gets"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForValue"),
+              Observability.tagKeyPair(Observability.keyType, "timedout"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new OperationTimeoutException("Timeout waiting for value", e);
+    } finally {
+      span.end();
     }
   }
 
@@ -1163,19 +1228,45 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public <T> CASValue<T> getAndTouch(String key, int exp, Transcoder<T> tc) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.getAndTouch", "getAndTouch");
+
     try {
       return asyncGetAndTouch(key, exp, tc).get(operationTimeout,
           TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getAndTouch"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForValue"),
+              Observability.tagKeyPair(Observability.keyType, "interrupted"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new RuntimeException("Interrupted waiting for value", e);
     } catch (ExecutionException e) {
       if(e.getCause() instanceof CancellationException) {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getAndTouch"),
+              Observability.tagKeyPair(Observability.keyType, "cancelled"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw (CancellationException) e.getCause();
       } else {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getAndTouch"),
+              Observability.tagKeyPair(Observability.keyType, "cancelled"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw new RuntimeException("Exception waiting for value", e);
       }
     } catch (TimeoutException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getAndTouch"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForValue"),
+              Observability.tagKeyPair(Observability.keyType, "timedout"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new OperationTimeoutException("Timeout waiting for value", e);
+    } finally {
+      span.end();
     }
   }
 
@@ -1225,19 +1316,41 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public <T> T get(String key, Transcoder<T> tc) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.get", "get");
+
     try {
       return asyncGet(key, tc).get(operationTimeout, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       throw new RuntimeException("Interrupted waiting for value", e);
     } catch (ExecutionException e) {
       if(e.getCause() instanceof CancellationException) {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "get"),
+              Observability.tagKeyPair(Observability.keyType, "cancellation"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw (CancellationException) e.getCause();
       } else {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "get"),
+              Observability.tagKeyPair(Observability.keyType, "execution"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw new RuntimeException("Exception waiting for value", e);
       }
     } catch (TimeoutException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "get"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingFoValue"),
+              Observability.tagKeyPair(Observability.keyType, "timedout"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new OperationTimeoutException("Timeout waiting for value: "
         + buildTimeoutMessage(operationTimeout, TimeUnit.MILLISECONDS), e);
+    } finally {
+      Observability.recordStatWithTags(Observability.mKeyLength, key == null ? 0 : key.length(),
+                                                        Observability.tagKeyPair(Observability.keyMethod, "get"));
+      span.end();
     }
   }
 
@@ -1551,6 +1664,8 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
   @Override
   public <T> Map<String, T> getBulk(Iterator<String> keyIter,
       Transcoder<T> tc) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.getBulk", "getBulk");
+
     try {
       return asyncGetBulk(keyIter, tc).get(operationTimeout,
           TimeUnit.MILLISECONDS);
@@ -1558,13 +1673,32 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
       throw new RuntimeException("Interrupted getting bulk values", e);
     } catch (ExecutionException e) {
       if(e.getCause() instanceof CancellationException) {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getBulk"),
+              Observability.tagKeyPair(Observability.keyType, "cancellation"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForIterator"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw (CancellationException) e.getCause();
       } else {
+        Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getBulk"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForIterator"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
         throw new RuntimeException("Exception waiting for bulk values", e);
       }
     } catch (TimeoutException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getBulk"),
+              Observability.tagKeyPair(Observability.keyType, "timeout"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForIterator"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new OperationTimeoutException("Timeout waiting for bulk values: "
         + buildTimeoutMessage(operationTimeout, TimeUnit.MILLISECONDS), e);
+    } finally {
+      span.end();
     }
   }
 
@@ -1657,6 +1791,8 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public Map<SocketAddress, String> getVersions() {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.getVersions", "getVersions");
+
     final Map<SocketAddress, String> rv =
         new ConcurrentHashMap<SocketAddress, String>();
 
@@ -1681,9 +1817,16 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
     try {
       blatch.await(operationTimeout, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getVersions"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForVersions"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new RuntimeException("Interrupted waiting for versions", e);
+    } finally {
+      span.end();
+      return rv;
     }
-    return rv;
   }
 
   /**
@@ -1709,6 +1852,8 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
    */
   @Override
   public Map<SocketAddress, Map<String, String>> getStats(final String arg) {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.getStats", "getStats");
+
     final Map<SocketAddress, Map<String, String>> rv =
         new ConcurrentHashMap<SocketAddress, Map<String, String>>();
 
@@ -1744,15 +1889,34 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
         });
       }
     });
+
     try {
       blatch.await(operationTimeout, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, "getStats"),
+              Observability.tagKeyPair(Observability.keyPhase, "waitingForStats"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+              
       throw new RuntimeException("Interrupted waiting for stats", e);
+    } finally {
+      // Ensure that we record the length of the stats argument.
+      Long argLength = new Long(arg != null ? arg.length() : 0);
+      Observability.recordStatWithTags(Observability.mKeyLength, argLength,
+                                         Observability.tagKeyPair(Observability.keyMethod, "getStats"));
+      span.end();
+    
+      return rv;
     }
-    return rv;
   }
 
   private long mutate(Mutator m, String key, long by, long def, int exp) {
+    String methodName = "incr";
+    if (m == Mutator.decr) {
+        methodName = "decr";
+    }
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached." + methodName, methodName);
+
     final AtomicLong rv = new AtomicLong();
     final CountDownLatch latch = new CountDownLatch(1);
     mconn.enqueueOperation(key, opFact.mutate(m, key, by, def, exp,
@@ -1776,7 +1940,15 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
             + "unable to modify counter [" + key + ']');
       }
     } catch (InterruptedException e) {
+      Observability.recordStatWithTags(Observability.mErrors, 1,
+              Observability.tagKeyPair(Observability.keyMethod, methodName),
+              Observability.tagKeyPair(Observability.keyType, "interrupted"),
+              Observability.tagKeyPair(Observability.keyReason, e.toString()));
+
       throw new RuntimeException("Interrupted", e);
+    } finally {
+      Observability.recordTaggedStat(Observability.keyMethod, methodName, Observability.mKeyLength, key == null ? 0 : key.length());
+      span.end();
     }
     getLogger().debug("Mutation returned %s", rv);
     return rv.get();
@@ -2301,7 +2473,7 @@ public class MemcachedClient extends SpyObject implements MemcachedClientIF,
   }
 
   /**
-   * Delete the given key from the cache of the given CAS value applies.
+   * Delete the given key from the cache if the given CAS value applies.
    *
    * @param key the key to delete
    * @param cas the CAS value to apply.

@@ -44,6 +44,10 @@ import net.spy.memcached.protocol.binary.MultiGetOperationImpl;
 import net.spy.memcached.protocol.binary.TapAckOperationImpl;
 import net.spy.memcached.util.StringUtils;
 
+// Observability
+import net.spy.memcached.Observability;
+import net.spy.memcached.Observability.RoundtripTrackingSpan;
+
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
@@ -342,40 +346,44 @@ public class MemcachedConnection extends SpyThread {
    */
   protected List<MemcachedNode> createConnections(
     final Collection<InetSocketAddress> addrs) throws IOException {
+    RoundtripTrackingSpan span = Observability.createRoundtripTrackingSpan("spy.memcached.createConnections", "createConnections");
     List<MemcachedNode> connections = new ArrayList<MemcachedNode>(addrs.size());
 
-    for (SocketAddress sa : addrs) {
-      SocketChannel ch = SocketChannel.open();
-      ch.configureBlocking(false);
-      MemcachedNode qa = connectionFactory.createMemcachedNode(sa, ch, bufSize);
-      qa.setConnection(this);
-      int ops = 0;
-      Socket socket = ch.socket();
-      socket.setTcpNoDelay(!connectionFactory.useNagleAlgorithm());
-      socket.setKeepAlive(connectionFactory.getKeepAlive());
+    try {
+      for (SocketAddress sa : addrs) {
+        SocketChannel ch = SocketChannel.open();
+        ch.configureBlocking(false);
+        MemcachedNode qa = connectionFactory.createMemcachedNode(sa, ch, bufSize);
+        qa.setConnection(this);
+        int ops = 0;
+        Socket socket = ch.socket();
+        socket.setTcpNoDelay(!connectionFactory.useNagleAlgorithm());
+        socket.setKeepAlive(connectionFactory.getKeepAlive());
       
-      try {
-        if (ch.connect(sa)) {
-          getLogger().info("Connected to %s immediately", qa);
-          connected(qa);
-        } else {
-          getLogger().info("Added %s to connect queue", qa);
-          ops = SelectionKey.OP_CONNECT;
+        try {
+          if (ch.connect(sa)) {
+            getLogger().info("Connected to %s immediately", qa);
+            connected(qa);
+          } else {
+            getLogger().info("Added %s to connect queue", qa);
+            ops = SelectionKey.OP_CONNECT;
+          }
+
+          selector.wakeup();
+          qa.setSk(ch.register(selector, ops, qa));
+          assert ch.isConnected()
+              || qa.getSk().interestOps() == SelectionKey.OP_CONNECT
+              : "Not connected, and not wanting to connect";
+        } catch (SocketException e) {
+          getLogger().warn("Socket error on initial connect", e);
+          queueReconnect(qa);
         }
-
-        selector.wakeup();
-        qa.setSk(ch.register(selector, ops, qa));
-        assert ch.isConnected()
-            || qa.getSk().interestOps() == SelectionKey.OP_CONNECT
-            : "Not connected, and not wanting to connect";
-      } catch (SocketException e) {
-        getLogger().warn("Socket error on initial connect", e);
-        queueReconnect(qa);
+        connections.add(qa);
       }
-      connections.add(qa);
+    } finally {
+      span.end();
+      return connections;
     }
-
-    return connections;
   }
 
   /**
